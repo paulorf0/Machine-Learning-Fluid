@@ -7,8 +7,20 @@
         pos : np.array((x : float, y : float))
 '''
 
+import numpy as np
 
 from entities.particle import Particle
+
+from kernel.poly6 import Poly6
+from kernel.spiky_gradient import Spiky_Gradient
+from kernel.viscosity_laplacian import Viscosity_Lapaclian
+
+REST_DENS = 1000.0  # Densidade da água (kg/m^3)
+STIFFNESS = 2000.0  # Constante do Gás (k) - Pressão
+VISC      = 200.0   # Viscosidade (mu)
+GRAVITY = 9.84
+DT        = 0.005   # Passo de Tempo (0.005s = 200 passos/segundo)
+
 
 class Engine:
     def __init__(self, radius, h, width, height):
@@ -19,6 +31,96 @@ class Engine:
         
         self.particles = []
         self.space = {}
+
+    def loop(self):
+        self.update_grid()
+
+        # Calc density and pressure
+        for p in self.particles:
+            p.rho = 0.0
+            p.force = np.array([0.0, 0.0]) 
+            
+            neighbors = self.get_neighbors(p)
+            
+            for n in neighbors:
+                diff_pos = p.pos - n.pos
+                r2 = np.dot(diff_pos, diff_pos) # r**2
+                
+                if r2 < self.h * self.h:
+                    r = np.sqrt(r2)
+                    p.rho += n.mass * Poly6(r, self.h)
+            
+            p.rho = max(p.rho, REST_DENS) 
+            
+            p.p = STIFFNESS * (p.rho - REST_DENS)
+
+        # Calc intern pressure and viscosity
+        for p in self.particles:
+            f_pressure = np.array([0.0, 0.0])
+            f_viscosity = np.array([0.0, 0.0])
+            
+            neighbors = self.get_neighbors(p)
+            
+            for n in neighbors:
+                if p == n:
+                    continue 
+                
+                diff_pos = p.pos - n.pos
+                r2 = np.dot(diff_pos, diff_pos)
+                
+                if r2 < self.h * self.h:
+                    r = np.sqrt(r2)
+                    grad_w = Spiky_Gradient(diff_pos, r, self.h) 
+                    
+                    term_press = (p.p + n.p) / (2 * n.rho) 
+                    f_pressure -= n.mass * term_press * grad_w # F = -m * term * grad
+
+                    lap_w = Viscosity_Lapaclian(r, self.h) 
+                    vel_diff = n.vel - p.vel
+                    
+                    term_visc = (vel_diff / n.rho) * lap_w
+                    f_viscosity += VISC * n.mass * term_visc
+            
+            f_gravity = p.rho * GRAVITY 
+
+            p.force = f_pressure + f_viscosity + f_gravity
+
+        # Temporal integration
+        for p in self.particles:
+            if p.rho > 0:
+                acc = p.force / p.rho
+            else:
+                acc = np.array([0.0, 0.0])
+
+            # Euler Semi-Implicito / Leap Frog Simplificado
+            p.vel += acc * DT
+            p.pos += p.vel * DT
+            
+            # wall collision
+            self.handle_boundary(p)
+
+    def handle_boundary(self, p):
+        damping = 0.5 
+        
+        # Left
+        if p.pos[0] < self.radius:
+            p.pos[0] = self.radius
+            p.vel[0] *= -damping
+            
+        # Right
+        elif p.pos[0] > self.width - self.radius:
+            p.pos[0] = self.width - self.radius
+            p.vel[0] *= -damping
+
+        # Up
+        if p.pos[1] < self.radius:
+            p.pos[1] = self.radius
+            p.vel[1] *= -damping
+            
+        # bottom
+        elif p.pos[1] > self.height - self.radius:
+            p.pos[1] = self.height - self.radius
+            p.vel[1] *= -damping
 
     def init_particles(self, rows, cols, start_x, start_y):
         spacing = self.radius * 2 
